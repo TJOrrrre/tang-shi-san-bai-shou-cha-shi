@@ -129,6 +129,11 @@
   .item .p{font-family:"Noto Serif SC",serif;font-size:14.5px;color:var(--ink2);margin-top:7px;line-height:1.6;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .item mark,.poem-body mark{background:var(--accent-soft);color:var(--accent-ink);border-radius:3px;padding:0 1px}
+  .grouphead{display:flex;align-items:baseline;gap:8px;padding:14px 4px 0}
+  .grouphead .gn{font-family:"Noto Serif SC",serif;font-weight:900;font-size:16.5px;color:var(--accent-ink)}
+  .grouphead .gc{font-size:12.5px;color:var(--muted)}
+  .item .p.match{color:var(--ink);background:var(--paper2);border-radius:8px;padding:7px 10px}
+  .scopeRow{margin-top:12px}
   .empty{
     background:var(--paper);border:1px dashed var(--line2);border-radius:12px;
     padding:34px 20px;text-align:center;color:var(--ink2);
@@ -200,7 +205,7 @@
   <header>
     <div class="seal" aria-hidden="true">詩</div>
     <h1 id="pageTitle">唐诗三百首</h1>
-    <p class="sub">当前文集共 <b id="totalCount">342</b> <span id="unitWord">首</span> · 输诗名、诗人，或任意一句，就能查</p>
+    <p class="sub">当前文集共 <b id="totalCount">342</b> <span id="unitWord">首</span> · 输诗名、诗人，或正文里的一个词，就能查</p>
     <div class="rule" aria-hidden="true"><span>查詩</span></div>
 
     <nav class="colltabs" id="collTabs" aria-label="文集切换"></nav>
@@ -208,9 +213,15 @@
     <form class="searchbox" id="searchForm" role="search">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
       <input id="q" type="search" autocomplete="off" enterkeyhint="search"
-        placeholder="如：静夜思 / 李白 / 床前看月光" aria-label="搜索诗名、诗人或诗句" />
+        placeholder="如：静夜思 / 李白 / 斗酒 / 凌绝顶" aria-label="搜索诗名、诗人或正文关键词" />
       <button class="btn primary" type="submit">查诗</button>
     </form>
+
+    <div class="hot scopeRow" role="group" aria-label="搜索范围">
+      <span class="lbl">搜索范围：</span>
+      <button type="button" class="chip on" id="scopeAll">全部 8 个文集</button>
+      <button type="button" class="chip" id="scopeOne">只搜当前文集</button>
+    </div>
 
     <div class="hot" id="hotRow" aria-label="热门搜索">
       <span class="lbl">大家常查：</span>
@@ -244,7 +255,8 @@
 
   <footer>
     <p>诗文全部取自开源项目 chinese-poetry（MIT 协议）：唐诗三百首、宋词、诗经、论语、楚辞、元曲、纳兰性德、五代诗词（花间集与南唐词）。<br/>
-    页面默认显示简体，可点「看繁体原文」对照；带「白话大意」的诗附有简要讲解，其余暂未收录讲解。各文集分开存放，点开哪个才加载哪个。</p>
+    页面默认显示简体，可点「看繁体原文」对照；带「白话大意」的诗附有简要讲解，其余暂未收录讲解。各文集分开存放，点开哪个才加载哪个。<br/>
+    搜索范围选「全部 8 个文集」时，输正文里的词或短语（如「斗酒」「凌绝顶」）会一次搜遍所有文集的全文，结果按文集分组，并标出命中的那一句。</p>
   </footer>
 </div>
 <div class="toast" id="toast" role="status"></div>
@@ -286,7 +298,8 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
   var conv=null;  // {s2t:{}, t2s:{}}
   var convLoading=false;
 
-  var state = { collId:"tang", q:"", author:"", form:"", lang:"s", selId:null, list:[], limit:120, loading:false };
+  var state = { collId:"tang", q:"", author:"", form:"", lang:"s", selId:null, list:[], limit:120, loading:false,
+                scope:"all", mode:"browse", gList:[], gSel:null, gToken:0, gFailed:[] };
 
   /* ---------- helpers ---------- */
   function esc(s){ return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
@@ -312,7 +325,7 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
 
   // 异文别名（仅唐诗三百首）：课本通行版与库内古本措辞不同时也能搜到
   function alias(p){
-    if(state.collId!=="tang") return "";
+    if((p._coll || state.collId)!=="tang") return "";
     var a=[];
     if(p.title==="静夜思") a.push("床前明月光 举头望明月 明月光");
     if(p.title==="相思") a.push("春来发几枝 红豆生南国");
@@ -345,16 +358,62 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
     });
   }
 
+  /* ---------- 关键词高亮 / 命中句 ---------- */
+  // 查询词的全部字形变体（原样、转简体、转繁体），长的在前
+  function qVariants(q){
+    var set=[], seen={};
+    String(q||"").trim().split(/\s+/).forEach(function(t){
+      if(!t) return;
+      var vs=[t];
+      if(conv){ vs.push(convStr(t, conv.t2s)); vs.push(convStr(t, conv.s2t)); }
+      vs.forEach(function(v){ if(v && !seen[v]){ seen[v]=1; set.push(v); } });
+    });
+    return set.sort(function(a,b){ return b.length-a.length; });
+  }
+  // 把文本里的关键词包上 <mark>（先按变体找位置，再逐段转义，避免破坏 HTML）
+  function hi(text, q){
+    text=String(text==null?"":text);
+    var vars=qVariants(q);
+    if(!vars.length) return esc(text);
+    var out="", i=0;
+    while(i<text.length){
+      var best=null;
+      for(var k=0;k<vars.length;k++){
+        if(text.substr(i, vars[k].length)===vars[k]){ best=vars[k]; break; }
+      }
+      if(best){ out+="<mark>"+esc(best)+"</mark>"; i+=best.length; }
+      else { out+=esc(text.charAt(i)); i++; }
+    }
+    return out;
+  }
+  // 找出正文里包含关键词的那一句（简繁两版都查），返回当前显示语言的那句
+  function matchLine(p, q){
+    var vars=qVariants(q);
+    if(!vars.length) return null;
+    var disp=paras(p);
+    var srcs=[p.paras||[]];
+    if(p.parasT) srcs.push(p.parasT);
+    else if(conv) srcs.push((p.paras||[]).map(function(l){ return toTrad(l); }));
+    for(var i=0;i<disp.length;i++){
+      for(var s=0;s<srcs.length;s++){
+        var line=srcs[s][i];
+        if(!line) continue;
+        for(var k=0;k<vars.length;k++){ if(line.indexOf(vars[k])>-1) return disp[i]; }
+      }
+    }
+    return null;
+  }
+
   /* ---------- data loading (per-collection, lazy) ---------- */
   function normalizeTang(){
     return POEMS.map(function(p){
-      return {id:p.id, title:p.title, titleT:p.titleT, author:p.author, authorT:p.authorT,
+      return {id:p.id, _coll:"tang", title:p.title, titleT:p.titleT, author:p.author, authorT:p.authorT,
               paras:p.paras, parasT:p.parasT, form:p.form, tags:p.tags||[], note:p.note||"", _hay:null};
     });
   }
-  function normalizeRows(rows){
+  function normalizeRows(rows, collId){
     return rows.map(function(r,i){
-      return {id:i, title:r[0], author:r[1], form:r[2],
+      return {id:i, _coll:collId, title:r[0], author:r[1], form:r[2],
               paras:r[3]?r[3].split("\n"):[], tags:r[4]?r[4].split("|"):[], note:r[5]||"", _hay:null};
     });
   }
@@ -371,17 +430,47 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
       if(done) done();
     }).catch(function(){ convLoading=false; if(done) done(); });
   }
+  var collLoading={};   // collId -> [callbacks]，避免同一文集被重复下载
   function loadCollection(c, done){
     if(cache[c.id]){ done(true); return; }
     if(!c.file){ cache[c.id]=normalizeTang(); done(true); return; }
+    if(collLoading[c.id]){ collLoading[c.id].push(done); return; }
+    collLoading[c.id]=[done];
     loadConv(function(){});
     fetch(c.file).then(function(r){
       if(!r.ok) throw new Error("bad");
       return r.json();
     }).then(function(rows){
-      cache[c.id]=normalizeRows(rows);
-      done(true);
-    }).catch(function(){ done(false); });
+      cache[c.id]=normalizeRows(rows, c.id);
+      var cbs=collLoading[c.id]||[]; delete collLoading[c.id];
+      cbs.forEach(function(cb){ cb(true); });
+    }).catch(function(){
+      var cbs=collLoading[c.id]||[]; delete collLoading[c.id];
+      cbs.forEach(function(cb){ cb(false); });
+    });
+  }
+  function waitConv(done){
+    var tries=0;
+    (function chk(){
+      if(conv || !convLoading || tries>50){ done(); return; }
+      tries++; setTimeout(chk, 100);
+    })();
+  }
+  // 跨文集搜索前，把 8 个文集都加载进来（已加载的直接用缓存）
+  function ensureAllLoaded(done, onProgress){
+    loadConv(function(){
+      waitConv(function(){
+        var total=COLLECTIONS.length, loaded=0, failed=[];
+        COLLECTIONS.forEach(function(c){
+          loadCollection(c, function(ok){
+            if(!ok) failed.push(c.name);
+            loaded++;
+            if(onProgress) onProgress(loaded, total);
+            if(loaded===total) done(failed);
+          });
+        });
+      });
+    });
   }
 
   /* ---------- collection tabs ---------- */
@@ -400,6 +489,7 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
 
   function switchCollection(id){
     state.collId=id; state.q=""; qEl.value=""; state.author=""; state.form=""; state.selId=null; state.limit=120;
+    state.mode="browse"; state.gList=[]; state.gSel=null; state.gToken++;
     renderTabs();
     var c=coll();
     pageTitleEl.textContent = c.name==="纳兰性德" ? "纳兰性德" : c.name;
@@ -461,11 +551,12 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
       formRow.innerHTML="";
     }
   }
-  authorSel.addEventListener("change", function(){ state.author=this.value; state.limit=120; apply(); });
+  authorSel.addEventListener("change", function(){ state.author=this.value; state.limit=120; setScope("one", true); apply(); });
   formRow.addEventListener("click", function(e){
     var b=e.target.closest("[data-form]"); if(!b) return;
     state.form=b.getAttribute("data-form"); state.limit=120;
     formRow.querySelectorAll(".chip").forEach(function(c){ c.classList.toggle("on", c===b); });
+    setScope("one", true);
     apply();
   });
 
@@ -474,13 +565,14 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
     coll().hot.forEach(function(h){
       var b=document.createElement("button");
       b.type="button"; b.className="chip"; b.textContent=h;
-      b.addEventListener("click", function(){ qEl.value=h; state.q=h; state.limit=120; apply(true); });
+      b.addEventListener("click", function(){ qEl.value=h; doSearch(true); });
       hotRow.appendChild(b);
     });
   }
 
   /* ---------- list ---------- */
   function apply(scrollTop){
+    state.mode="browse";
     var all=items();
     state.list = all.filter(function(p){
       if(state.author && p.author!==state.author) return false;
@@ -528,13 +620,121 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
       moreBtn.style.display="none";
     }
   }
-  moreBtn.addEventListener("click", function(){ state.limit += 200; renderList(); });
+  moreBtn.addEventListener("click", function(){ state.limit += 200; refreshList(); });
   resultsEl.addEventListener("click", function(e){
+    if(state.mode==="global"){
+      var g=e.target.closest("[data-gidx]"); if(!g) return;
+      var gp=state.gList[parseInt(g.getAttribute("data-gidx"),10)];
+      if(gp) openGlobal(gp, false);
+      return;
+    }
     var b=e.target.closest("[data-id]"); if(!b) return;
     openPoem(parseInt(b.getAttribute("data-id"),10), false);
   });
 
-  function current(){ return items().find(function(p){ return p.id===state.selId; }) || state.list[0]; }
+  function refreshList(){
+    if(state.mode==="global") renderGlobalList(); else renderList();
+  }
+
+  /* ---------- 搜索范围 / 跨文集全文搜索 ---------- */
+  function syncScopeButtons(){
+    $("scopeAll").classList.toggle("on", state.scope==="all");
+    $("scopeOne").classList.toggle("on", state.scope==="one");
+  }
+  function setScope(s, silent){
+    state.scope=s; syncScopeButtons();
+    if(!silent && qEl.value.trim()) doSearch(false);
+  }
+  $("scopeAll").addEventListener("click", function(){ setScope("all"); });
+  $("scopeOne").addEventListener("click", function(){ setScope("one"); });
+
+  function doSearch(scroll){
+    state.q=qEl.value.trim(); state.limit=120;
+    if(state.q && state.scope==="all"){ runGlobal(scroll); }
+    else { state.gToken++; apply(scroll); }
+  }
+
+  function runGlobal(scroll){
+    state.mode="global"; state.gList=[]; state.gSel=null;
+    var token=++state.gToken;
+    var q=state.q;
+    listTitleEl.textContent="正在全部文集里搜“"+q+"”";
+    listCountEl.textContent="";
+    resultsEl.innerHTML='<div class="empty"><div class="big serif">正在搜索全部 8 个文集</div>' +
+      '<p>宋词、元曲数据较大，第一次会把各文集都加载进来，请稍等。<br/>进度：<span id="gProg">0 / 8</span></p></div>';
+    moreBtn.style.display="none";
+    ensureAllLoaded(function(failed){
+      if(token!==state.gToken || state.mode!=="global") return;
+      var flat=[];
+      COLLECTIONS.forEach(function(c){
+        (cache[c.id]||[]).forEach(function(p){ if(matches(p, q)) flat.push(p); });
+      });
+      state.gList=flat; state.gFailed=failed;
+      renderGlobalList();
+      if(flat.length){
+        openGlobal(flat[0], true);
+      } else {
+        readerEl.innerHTML='<button class="closeX" id="closeX2" type="button">✕ 关闭</button>' +
+          '<div class="empty" style="margin-top:40px"><div class="big serif">没有找到</div>' +
+          '<p>8 个文集里都没有包含「'+esc(q)+'」的诗文，换个词试试。</p></div>';
+        bindClose();
+      }
+      if(scroll && window.innerWidth>860){ window.scrollTo({top:0,behavior:"smooth"}); }
+    }, function(loaded, total){
+      var el=document.getElementById("gProg");
+      if(el) el.textContent=loaded+" / "+total;
+    });
+  }
+
+  function renderGlobalList(){
+    var q=state.q;
+    listTitleEl.textContent="“"+q+"” · 全部文集";
+    listCountEl.textContent="共 "+state.gList.length+" 首" +
+      (state.gFailed.length ? "（"+state.gFailed.join("、")+"加载失败，未计入）" : "");
+    if(!state.gList.length){
+      resultsEl.innerHTML='<div class="empty"><div class="big serif">一首也没找到</div>' +
+        '<p>8 个文集的正文里都没有「'+esc(q)+'」。<br/>试试换个词，或者只输其中两个字。</p></div>';
+      moreBtn.style.display="none";
+      return;
+    }
+    var counts={}, units={};
+    state.gList.forEach(function(p){ counts[p._coll]=(counts[p._coll]||0)+1; });
+    COLLECTIONS.forEach(function(c){ units[c.id]=c.unit; });
+    var shown=state.gList.slice(0, state.limit);
+    var html="", lastColl=null;
+    shown.forEach(function(p, i){
+      if(p._coll!==lastColl){
+        lastColl=p._coll;
+        var cn=(COLLECTIONS.find(function(x){ return x.id===p._coll; })||{}).name||"";
+        html+='<div class="grouphead"><span class="gn">'+esc(cn)+'</span><span class="gc">'+counts[p._coll]+' '+(units[p._coll]||"首")+'</span></div>';
+      }
+      var ml=matchLine(p, q);
+      var preview = ml
+        ? '<div class="p match">'+hi(ml, q)+'</div>'
+        : '<div class="p">'+esc(paras(p).slice(0,2).join(""))+'</div>';
+      html+='<button type="button" class="item'+(p===state.gSel?" sel":"")+'" data-gidx="'+i+'">' +
+        '<div class="t">'+hi(title(p), q)+'</div>' +
+        '<div class="m"><b>'+esc(author(p))+'</b> · '+esc(formLabel(p))+'</div>' + preview + '</button>';
+    });
+    resultsEl.innerHTML=html;
+    if(state.gList.length>state.limit){
+      moreBtn.style.display="";
+      moreBtn.textContent="显示更多（还剩 "+(state.gList.length-state.limit)+" 首）";
+    } else {
+      moreBtn.style.display="none";
+    }
+  }
+
+  function openGlobal(p, silent){
+    state.gSel=p;
+    renderGlobalList(); renderReader(p);
+    if(window.innerWidth<=860 && !silent){ readerEl.classList.add("open"); document.body.style.overflow="hidden"; }
+  }
+
+  function current(){
+    if(state.mode==="global") return state.gSel || state.gList[0];
+    return items().find(function(p){ return p.id===state.selId; }) || state.list[0];
+  }
 
   function openPoem(id, silent){
     state.selId=id;
@@ -551,19 +751,22 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
 
   function renderReader(p){
     if(!p) return;
-    var c=coll();
-    var idx = state.list.findIndex(function(x){ return x.id===p.id; });
-    var prev = idx>0 ? state.list[idx-1] : null;
-    var next = idx>=0 && idx<state.list.length-1 ? state.list[idx+1] : null;
+    var isG = state.mode==="global";
+    var c = isG ? (COLLECTIONS.find(function(x){ return x.id===p._coll; }) || coll()) : coll();
+    var list = isG ? state.gList : state.list;
+    var idx = list.findIndex(function(x){ return x===p || (x.id===p.id && x._coll===p._coll); });
+    var prev = idx>0 ? list[idx-1] : null;
+    var next = idx>=0 && idx<list.length-1 ? list[idx+1] : null;
     var ps = paras(p);
     var tagList = (p.tags||[]).filter(function(t){ return t && t!==p.form; });
     readerEl.innerHTML =
       '<button class="closeX" id="closeX" type="button">✕ 关闭</button>' +
       '<div style="text-align:center"><span class="r-form">'+esc(formLabel(p))+'</span></div>' +
       '<h2 class="r-title">'+esc(title(p))+'</h2>' +
-      '<p class="r-author"><span class="dyn">'+esc(c.era)+'</span><b>'+esc(author(p))+'</b></p>' +
+      '<p class="r-author"><span class="dyn">'+esc(c.era)+'</span><b>'+esc(author(p))+'</b>' +
+        (isG ? '<span style="color:var(--muted);font-size:13px"> · 出自「'+esc(c.name)+'」</span>' : '') + '</p>' +
       '<div class="r-rule" aria-hidden="true"><span>◆</span></div>' +
-      '<div class="poem-body">' + ps.map(function(l){ return '<p class="line">'+esc(l)+'</p>'; }).join("") + '</div>' +
+      '<div class="poem-body">' + ps.map(function(l){ return '<p class="line">'+(state.q ? hi(l, state.q) : esc(l))+'</p>'; }).join("") + '</div>' +
       ((tagList.length) ? '<div class="tags">'+tagList.slice(0,6).map(function(t){return "<span>"+esc(state.lang==="t"?toTrad(t):t)+"</span>";}).join("")+'</div>' : '') +
       (p.note ? '<div class="note"><div class="nh">白 话 大 意</div>'+esc(p.note)+'</div>' : '') +
       '<div class="r-actions">' +
@@ -583,8 +786,14 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
       } else { fallbackCopy(text); done(); }
     });
     $("randBtn2").addEventListener("click", randomPoem);
-    if(prev) $("prevBtn").addEventListener("click", function(){ openPoem(prev.id,false); if(window.innerWidth>860) readerEl.scrollIntoView({behavior:"smooth",block:"start"}); });
-    if(next) $("nextBtn").addEventListener("click", function(){ openPoem(next.id,false); if(window.innerWidth>860) readerEl.scrollIntoView({behavior:"smooth",block:"start"}); });
+    if(prev) $("prevBtn").addEventListener("click", function(){
+      if(isG) openGlobal(prev,false); else openPoem(prev.id,false);
+      if(window.innerWidth>860) readerEl.scrollIntoView({behavior:"smooth",block:"start"});
+    });
+    if(next) $("nextBtn").addEventListener("click", function(){
+      if(isG) openGlobal(next,false); else openPoem(next.id,false);
+      if(window.innerWidth>860) readerEl.scrollIntoView({behavior:"smooth",block:"start"});
+    });
   }
   function fallbackCopy(text){
     var ta=document.createElement("textarea");
@@ -597,6 +806,7 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
   function randomPoem(){
     var all=items(); if(!all.length) return;
     var p = all[Math.floor(Math.random()*all.length)];
+    state.mode="browse"; state.gToken++;
     state.q=""; qEl.value=""; state.author=""; authorSel.value=""; state.form=""; state.limit=120;
     formRow.querySelectorAll(".chip").forEach(function(c,i){ c.classList.toggle("on", i===0); });
     state.list = all.slice();
@@ -605,11 +815,11 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
   }
 
   /* ---------- events ---------- */
-  $("searchForm").addEventListener("submit", function(e){ e.preventDefault(); state.q=qEl.value.trim(); state.limit=120; apply(true); });
+  $("searchForm").addEventListener("submit", function(e){ e.preventDefault(); doSearch(true); });
   var debounce;
   qEl.addEventListener("input", function(){
     clearTimeout(debounce);
-    debounce=setTimeout(function(){ state.q=qEl.value.trim(); state.limit=120; apply(false); },160);
+    debounce=setTimeout(function(){ doSearch(false); },300);
   });
   $("randomBtn").addEventListener("click", randomPoem);
   $("clearBtn").addEventListener("click", function(){
@@ -622,8 +832,8 @@ var POEMS = [{"id": 0, "title": "下终南山过斛斯山人宿置酒", "titleT"
     langBtn.textContent = state.lang==="s" ? "看繁体原文" : "看简体";
     langBtn.classList.toggle("on", state.lang==="t");
     langBtn.setAttribute("aria-pressed", state.lang==="t" ? "true" : "false");
-    if(state.lang==="t" && !conv){ loadConv(function(){ renderList(); renderReader(current()); }); }
-    renderList(); renderReader(current());
+    if(state.lang==="t" && !conv){ loadConv(function(){ refreshList(); renderReader(current()); }); }
+    refreshList(); renderReader(current());
     toast(state.lang==="t" ? "已切换为繁体" : "已切换为简体");
   });
   document.addEventListener("keydown", function(e){
